@@ -324,9 +324,13 @@ write_env_file() {
   if [ ! -s "$ENV_FILE" ]; then
     _admin_pass="${ADMIN_PASS:-$(rand_secret)}"
     _collab_pass="${COLLABORA_ADMIN_PASS:-$(rand_secret)}"
-    # INSECURE: true when no domain is set (local/self-signed); false for internet-facing.
-    _insecure="${DOMAIN:+false}"
-    _insecure="${_insecure:-true}"
+    # INSECURE: false for real multi-label domains (example.com, cloud.example.com).
+    # true for empty, 'localhost', or any single-label hostname (no dot → no valid cert).
+    if [ -z "$DOMAIN" ] || [ "${DOMAIN%%.*}" = "$DOMAIN" ]; then
+      _insecure="true"
+    else
+      _insecure="false"
+    fi
     # Infer Collabora subdomains from the base domain.
     _base_domain="$(infer_base_domain "${DOMAIN:-localhost}")"
     _collabora_domain="collabora.${_base_domain}"
