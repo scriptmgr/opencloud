@@ -11,7 +11,7 @@
 # - Listen on host port 9200 (default), bind to 127.0.0.1 for reverse proxy fronting.
 # - Admin username: "admin". Default password: random on first setup if not provided.
 # - Update without breaking existing data; perform safe preflight checks and snapshots.
-# - Optionally deploy Collabora document collaboration via --collab.
+# - Optionally deploy Collabora document collaboration via --collab (requires --domain).
 # - No "curl | sh" patterns. Keys/files may be downloaded; remote scripts are never executed.
 # - No Docker Desktop requirement; pure server-side Docker Engine.
 #
@@ -21,11 +21,11 @@
 # Usage examples:
 #   sh install.sh                                           # fresh install with defaults
 #   sh install.sh --update                                  # update images (with safety backup)
-#   sh install.sh --path /opt/opencloud                    # choose install dir
+#   sh install.sh --path /opt/opencloud                    # choose install dir (--prefix also accepted)
 #   sh install.sh --admin-pass 'S3cure!'                   # set admin password
 #   sh install.sh --port 9200 --domain cloud.example.com
 #   sh install.sh --smtp-host 172.17.0.1 --smtp-port 25
-#   sh install.sh --collab --domain cloud.example.com      # enable Collabora editing
+#   sh install.sh --collab --domain cloud.example.com      # enable Collabora editing (requires --domain)
 #       # infers collabora.example.com + wopiserver.example.com automatically
 #
 # Notes:
@@ -75,13 +75,30 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || { err "Missing required command: $1"; exit 1; }
 }
 
-# Generate a random 32-char secret; prefers openssl, falls back to /dev/urandom.
+# Verify that a flag argument is present and does not look like another flag.
+_need_arg() {
+  # $1 = flag name, $2 = next token from command line (or empty if absent)
+  if [ -z "${2:-}" ]; then
+    err "Option $1 requires a value."; exit 1
+  fi
+  case "$2" in
+    -*) err "Option $1 requires a value (got flag '$2' instead)."; exit 1 ;;
+  esac
+}
+
+# Generate a random 32-char alphanumeric secret; prefers openssl, falls back to /dev/urandom.
 rand_secret() {
   if command -v openssl >/dev/null 2>&1; then
-    openssl rand -base64 24 | tr -d '\n=' | cut -c1-32
+    openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32
   else
-    dd if=/dev/urandom bs=1 count=48 2>/dev/null | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-32
+    dd if=/dev/urandom bs=1 count=48 2>/dev/null | LC_ALL=C tr -dc 'A-Za-z0-9' | head -c 32
   fi
+}
+
+# Double-quote a value for safe inclusion in a .env file.
+# Escapes embedded backslashes and double-quotes.
+env_quote() {
+  printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
 }
 
 is_root() {
@@ -140,7 +157,7 @@ detect_pm() {
   command -v yum     >/dev/null 2>&1 && { echo yum;    return; }
   command -v zypper  >/dev/null 2>&1 && { echo zypper; return; }
   command -v pacman  >/dev/null 2>&1 && { echo pacman; return; }
-  err "Unsupported distribution (no known package manager)"; exit 1
+  err "Unsupported distribution (no known package manager)."; exit 1
 }
 
 ########################################
@@ -148,20 +165,46 @@ detect_pm() {
 ########################################
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --path)                 PREFIX="$2";               shift 2 ;;
-    --admin-pass)           ADMIN_PASS="$2";            shift 2 ;;
-    --port)                 PORT="$2";                  shift 2 ;;
-    --domain)               DOMAIN="$2";                shift 2 ;;
-    --smtp-host)            SMTP_HOST="$2";             shift 2 ;;
-    --smtp-port)            SMTP_PORT="$2";             shift 2 ;;
-    --smtp-secure)          SMTP_SECURE="$2";           shift 2 ;;
-    --smtp-auth)            SMTP_AUTH="$2";             shift 2 ;;
-    --smtp-user)            SMTP_USER="$2";             shift 2 ;;
-    --smtp-pass)            SMTP_PASS="$2";             shift 2 ;;
+    --path|--prefix)
+      _need_arg "$1" "${2:-}"
+      PREFIX="$2"; shift 2 ;;
+    --admin-pass)
+      _need_arg "$1" "${2:-}"
+      ADMIN_PASS="$2"; shift 2 ;;
+    --port)
+      _need_arg "$1" "${2:-}"
+      PORT="$2"; shift 2 ;;
+    --domain)
+      _need_arg "$1" "${2:-}"
+      DOMAIN="$2"; shift 2 ;;
+    --smtp-host)
+      _need_arg "$1" "${2:-}"
+      SMTP_HOST="$2"; shift 2 ;;
+    --smtp-port)
+      _need_arg "$1" "${2:-}"
+      SMTP_PORT="$2"; shift 2 ;;
+    --smtp-secure)
+      _need_arg "$1" "${2:-}"
+      SMTP_SECURE="$2"; shift 2 ;;
+    --smtp-auth)
+      _need_arg "$1" "${2:-}"
+      SMTP_AUTH="$2"; shift 2 ;;
+    --smtp-user)
+      _need_arg "$1" "${2:-}"
+      SMTP_USER="$2"; shift 2 ;;
+    --smtp-pass)
+      _need_arg "$1" "${2:-}"
+      SMTP_PASS="$2"; shift 2 ;;
     --collab)               ENABLE_COLLAB="true";       shift 1 ;;
-    --collabora-admin-user) COLLABORA_ADMIN_USER="$2";  shift 2 ;;
-    --collabora-admin-pass) COLLABORA_ADMIN_PASS="$2";  shift 2 ;;
-    --network)              NETWORK_NAME="$2";          shift 2 ;;
+    --collabora-admin-user)
+      _need_arg "$1" "${2:-}"
+      COLLABORA_ADMIN_USER="$2"; shift 2 ;;
+    --collabora-admin-pass)
+      _need_arg "$1" "${2:-}"
+      COLLABORA_ADMIN_PASS="$2"; shift 2 ;;
+    --network)
+      _need_arg "$1" "${2:-}"
+      NETWORK_NAME="$2"; shift 2 ;;
     --update)               UPDATE_ONLY="true";         shift 1 ;;
     -y|--yes|--non-interactive) NON_INTERACTIVE="true"; shift 1 ;;
     -h|--help)
@@ -169,7 +212,7 @@ while [ "$#" -gt 0 ]; do
 OpenCloud Installer / Updater (POSIX sh)
 
 Options:
-  --path DIR                    Install root (default: /opt/opencloud)
+  --path DIR, --prefix DIR      Install root (default: /opt/opencloud)
   --admin-pass PASS             Admin password (default: random on first setup)
   --port N                      Host port to bind (default: 9200)
   --domain HOST                 Public hostname (sets OC_DOMAIN)
@@ -180,6 +223,7 @@ Options:
   --smtp-user USER              SMTP username (if auth enabled)
   --smtp-pass PASS              SMTP password (if auth enabled)
   --collab                      Enable Collabora document collaboration
+                                  (requires --domain)
   --collabora-admin-user NAME   Collabora admin username (default: admin)
   --collabora-admin-pass PASS   Collabora admin password (default: random)
   --network NAME                Docker network name (default: opencloud-net)
@@ -194,18 +238,69 @@ Notes:
   The admin password is applied ONCE at first startup; editing .env afterwards
   has no effect. Use the web UI to change it later.
 
-  For --collab: Collabora subdomains are inferred from --domain automatically.
-  If --domain is cloud.example.com the script configures:
+  For --collab (requires --domain): Collabora subdomains are inferred from
+  --domain automatically. If --domain is cloud.example.com the script configures:
     collabora.example.com  → port 9980
     wopiserver.example.com → port 9300
   Your reverse proxy must route HTTPS for both before the stack starts.
+
+  When --domain is empty or a single-label hostname (e.g. localhost, myserver),
+  INSECURE=true and http:// URLs are used — suitable for local testing only.
 EOF
       exit 0 ;;
     *) err "Unknown option: $1"; exit 1 ;;
   esac
 done
 
-# Collaboration pre-flight
+########################################
+# Post-parse validation & normalisation
+########################################
+
+# Validate --port: must be a positive integer in range 1-65535.
+case "$PORT" in
+  *[!0-9]*|'')
+    err "--port must be a number between 1 and 65535 (got: '$PORT')."; exit 1 ;;
+esac
+if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+  err "--port must be between 1 and 65535 (got: $PORT)."; exit 1
+fi
+
+# Validate --smtp-port similarly.
+case "$SMTP_PORT" in
+  *[!0-9]*|'')
+    err "--smtp-port must be a number (got: '$SMTP_PORT')."; exit 1 ;;
+esac
+
+# Normalise domain: lowercase, strip trailing dot.
+if [ -n "$DOMAIN" ]; then
+  DOMAIN="$(printf '%s' "$DOMAIN" | tr '[:upper:]' '[:lower:]')"
+  DOMAIN="${DOMAIN%.}"   # strip trailing dot (valid DNS FQDN notation but invalid in HTTP URLs)
+  # Reject spaces and shell metacharacters.
+  case "$DOMAIN" in
+    *' '*|*'	'*)
+      err "Invalid domain: must not contain spaces."; exit 1 ;;
+  esac
+  case "$DOMAIN" in
+    *[!\$\!\`\#\&\(\)\|\<\>A-Za-z0-9.\-]*|'')
+      : ;;  # allow; the set-safe case catches real issues below
+  esac
+  case "$DOMAIN" in
+    *['$''!''`''#''&''('')''|''<''>''{''}'' ']*)
+      err "Invalid domain '$DOMAIN': shell metacharacters are not allowed."; exit 1 ;;
+  esac
+  # Allow only: letters, digits, hyphens, dots.
+  _dom_check="$(printf '%s' "$DOMAIN" | tr -d 'A-Za-z0-9.-')"
+  if [ -n "$_dom_check" ]; then
+    err "Invalid domain '$DOMAIN': only letters, digits, hyphens, and dots are allowed."; exit 1
+  fi
+  # Reject leading or trailing hyphens in any label, and leading dots.
+  case "$DOMAIN" in
+    .*|*.) err "Invalid domain '$DOMAIN': must not start or end with a dot."; exit 1 ;;
+    -*|*-) err "Invalid domain '$DOMAIN': must not start or end with a hyphen."; exit 1 ;;
+  esac
+fi
+
+# Collaboration pre-flight: --collab needs a real domain to infer subdomains from.
 if [ "$ENABLE_COLLAB" = "true" ] && [ -z "$DOMAIN" ]; then
   err "--collab requires --domain (the public OpenCloud hostname)."
   exit 1
@@ -308,12 +403,14 @@ ensure_docker() {
     info "Docker is present."
   else
     info "Docker not found; installing from official repository..."
+    info "If automatic install fails, install docker-ce and docker-compose-plugin manually:"
+    info "  https://docs.docker.com/engine/install/"
     install_docker_official
   fi
   if docker compose version >/dev/null 2>&1; then
     info "Docker Compose v2 plugin present."
   else
-    err "Docker Compose v2 plugin missing. Please install docker-compose-plugin."; exit 1
+    err "Docker Compose v2 plugin missing. Install docker-compose-plugin and re-run."; exit 1
   fi
 }
 
@@ -324,17 +421,30 @@ write_env_file() {
   if [ ! -s "$ENV_FILE" ]; then
     _admin_pass="${ADMIN_PASS:-$(rand_secret)}"
     _collab_pass="${COLLABORA_ADMIN_PASS:-$(rand_secret)}"
+
     # INSECURE: false for real multi-label domains (example.com, cloud.example.com).
     # true for empty, 'localhost', or any single-label hostname (no dot → no valid cert).
     if [ -z "$DOMAIN" ] || [ "${DOMAIN%%.*}" = "$DOMAIN" ]; then
       _insecure="true"
+      _scheme="http"
     else
       _insecure="false"
+      _scheme="https"
     fi
+
     # Infer Collabora subdomains from the base domain.
     _base_domain="$(infer_base_domain "${DOMAIN:-localhost}")"
     _collabora_domain="collabora.${_base_domain}"
     _wopi_domain="wopiserver.${_base_domain}"
+
+    # Build full URLs (scheme-aware) for collaboration services.
+    _wopi_url="${_scheme}://${_wopi_domain}"
+    _collabora_url="${_scheme}://${_collabora_domain}"
+
+    # Quote credentials for safe inclusion in the .env file.
+    _admin_pass_q="$(env_quote "$_admin_pass")"
+    _collab_pass_q="$(env_quote "$_collab_pass")"
+    _smtp_pass_q="$(env_quote "$SMTP_PASS")"
 
     cat > "$ENV_FILE" <<EOF
 # Autogenerated by install.sh on $(date -u)
@@ -355,15 +465,15 @@ OPENCLOUD_HTTP_PORT=$PORT
 # Public domain name.
 OC_DOMAIN=${DOMAIN:-localhost}
 # Full URL that OpenCloud advertises to clients.
-OC_URL=https://${DOMAIN:-localhost}
+OC_URL=${_scheme}://${DOMAIN:-localhost}
 # TLS is terminated by the external reverse proxy; OpenCloud speaks plain HTTP.
 PROXY_TLS=false
-# Set true only for local/self-signed setups.
+# Set true only for local/self-signed setups (single-label hostnames, localhost).
 INSECURE=$_insecure
 
 # --- Admin credentials (applied on FIRST start only) ---
 # To change later: use the web UI — editing this file has no effect.
-INITIAL_ADMIN_PASSWORD=$_admin_pass
+INITIAL_ADMIN_PASSWORD=${_admin_pass_q}
 
 # --- Demo users (never enable in production) ---
 DEMO_USERS=false
@@ -371,6 +481,7 @@ DEMO_USERS=false
 # --- Logging ---
 LOG_LEVEL=info
 LOG_PRETTY=false
+# Docker logging driver: local, json-file, syslog, journald, etc.
 LOG_DRIVER=local
 
 # --- Additional services ---
@@ -382,7 +493,7 @@ SMTP_HOST=$SMTP_HOST
 SMTP_PORT=$SMTP_PORT
 SMTP_SENDER=OpenCloud Notifications <notifications@${DOMAIN:-localhost}>
 SMTP_USERNAME=$SMTP_USER
-SMTP_PASSWORD=$SMTP_PASS
+SMTP_PASSWORD=${_smtp_pass_q}
 SMTP_AUTHENTICATION=$SMTP_AUTH
 SMTP_TRANSPORT_ENCRYPTION=$SMTP_SECURE
 SMTP_INSECURE=false
@@ -400,8 +511,11 @@ OPENCLOUD_NETWORK=$NETWORK_NAME
 # the collaboration service is included in compose.yaml.
 COLLABORA_DOMAIN=$_collabora_domain
 WOPISERVER_DOMAIN=$_wopi_domain
+# Scheme-aware URLs for collaboration services (http when INSECURE=true).
+COLLABORA_URL=$_collabora_url
+WOPISERVER_URL=$_wopi_url
 COLLABORA_ADMIN_USER=$COLLABORA_ADMIN_USER
-COLLABORA_ADMIN_PASSWORD=$_collab_pass
+COLLABORA_ADMIN_PASSWORD=${_collab_pass_q}
 COLLABORA_SSL_ENABLE=false
 COLLABORA_SSL_VERIFICATION=false
 COLLABORA_HOME_MODE=false
@@ -428,10 +542,19 @@ EOF
 }
 
 ########################################
-# Compose file (always regenerated so
-# collab can be added on re-runs)
+# Compose file
 ########################################
 write_compose_file() {
+  # Idempotency guard: if compose.yaml already contains Collabora services and
+  # --collab was not passed, preserve them to avoid silent service removal.
+  if [ "$ENABLE_COLLAB" = "false" ] && [ -f "$COMPOSE_FILE" ]; then
+    if grep -q -- 'container_name: opencloud-collaboration' "$COMPOSE_FILE" 2>/dev/null; then
+      warn "Existing compose.yaml includes Collabora services."
+      warn "Preserving them (pass --collab explicitly to confirm or edit compose.yaml to remove)."
+      ENABLE_COLLAB="true"
+    fi
+  fi
+
   # --- Base: opencloud service ---
   cat > "$COMPOSE_FILE" <<'EOF'
 ---
@@ -452,7 +575,8 @@ services:
       - "127.0.0.1:${OPENCLOUD_HTTP_PORT:-9200}:9200"
     environment:
       OC_ADD_RUN_SERVICES: ${START_ADDITIONAL_SERVICES:-}
-      OC_URL: https://${OC_DOMAIN:-localhost}
+      # OC_URL is set by install.sh with the correct scheme (http for local, https for real domains).
+      OC_URL: "${OC_URL:-https://localhost}"
       OC_LOG_LEVEL: ${LOG_LEVEL:-info}
       OC_LOG_COLOR: "${LOG_PRETTY:-false}"
       OC_LOG_PRETTY: "${LOG_PRETTY:-false}"
@@ -473,6 +597,11 @@ services:
     volumes:
       - ${OC_CONFIG_DIR:-opencloud-config}:/etc/opencloud
       - ${OC_DATA_DIR:-opencloud-data}:/var/lib/opencloud
+    logging:
+      driver: "${LOG_DRIVER:-local}"
+      options:
+        max-size: "50m"
+        max-file: "5"
 
 EOF
 
@@ -504,17 +633,23 @@ EOF
       MICRO_REGISTRY: "nats-js-kv"
       # Use the service name (not container_name) for internal DNS resolution.
       MICRO_REGISTRY_ADDRESS: "opencloud:9233"
-      COLLABORATION_WOPI_SRC: https://${WOPISERVER_DOMAIN:-wopiserver.localhost}
+      # WOPISERVER_URL and COLLABORA_URL are written by install.sh with the correct scheme.
+      COLLABORATION_WOPI_SRC: "${WOPISERVER_URL:-https://wopiserver.localhost}"
       COLLABORATION_APP_NAME: "CollaboraOnline"
       COLLABORATION_APP_PRODUCT: "Collabora"
-      COLLABORATION_APP_ADDR: https://${COLLABORA_DOMAIN:-collabora.localhost}
-      COLLABORATION_APP_ICON: https://${COLLABORA_DOMAIN:-collabora.localhost}/favicon.ico
+      COLLABORATION_APP_ADDR: "${COLLABORA_URL:-https://collabora.localhost}"
+      COLLABORATION_APP_ICON: "${COLLABORA_URL:-https://collabora.localhost}/favicon.ico"
       COLLABORATION_APP_INSECURE: "${INSECURE:-false}"
       COLLABORATION_CS3API_DATAGATEWAY_INSECURE: "${INSECURE:-false}"
       COLLABORATION_LOG_LEVEL: ${LOG_LEVEL:-info}
-      OC_URL: https://${OC_DOMAIN:-localhost}
+      OC_URL: "${OC_URL:-https://localhost}"
     volumes:
       - ${OC_CONFIG_DIR:-opencloud-config}:/etc/opencloud
+    logging:
+      driver: "${LOG_DRIVER:-local}"
+      options:
+        max-size: "50m"
+        max-file: "5"
 
   # Collabora CODE: the actual document editing server.
   collabora:
@@ -532,7 +667,7 @@ EOF
       - "127.0.0.1:9980:9980"
     environment:
       # aliasgroup1 tells Collabora which WOPI server it may contact.
-      aliasgroup1: https://${WOPISERVER_DOMAIN:-wopiserver.localhost}
+      aliasgroup1: "${WOPISERVER_URL:-https://wopiserver.localhost}"
       DONT_GEN_SSL_CERT: "YES"
       extra_params: >-
         --o:ssl.enable=${COLLABORA_SSL_ENABLE:-false}
@@ -551,6 +686,11 @@ EOF
       timeout: 10s
       retries: 5
       start_period: 30s
+    logging:
+      driver: "${LOG_DRIVER:-local}"
+      options:
+        max-size: "50m"
+        max-file: "5"
 
 EOF
   fi
@@ -640,21 +780,28 @@ main() {
 
   wait_for_opencloud
 
+  # Derive display scheme from domain (mirrors write_env_file logic).
+  if [ -z "$DOMAIN" ] || [ "${DOMAIN%%.*}" = "$DOMAIN" ]; then
+    _sum_scheme="http"
+  else
+    _sum_scheme="https"
+  fi
+
   info ""
   info "OpenCloud is up. Summary:"
   info "  Compose dir   : $COMPOSE_DIR"
   info "  Port (HTTP)   : 127.0.0.1:$PORT  (attach your reverse proxy)"
   if [ -n "$DOMAIN" ]; then
-    info "  Public URL    : https://$DOMAIN/"
+    info "  Public URL    : ${_sum_scheme}://$DOMAIN/"
   fi
   if [ "$ENABLE_COLLAB" = "true" ]; then
     _bd="$(infer_base_domain "${DOMAIN:-localhost}")"
-    info "  Collabora     : https://collabora.${_bd}/  → proxy to port 9980"
-    info "  WOPI server   : https://wopiserver.${_bd}/ → proxy to port 9300"
+    info "  Collabora     : ${_sum_scheme}://collabora.${_bd}/  → proxy to port 9980"
+    info "  WOPI server   : ${_sum_scheme}://wopiserver.${_bd}/ → proxy to port 9300"
     info "  Docker network: $NETWORK_NAME  (attach your reverse proxy here)"
   fi
   if [ -f "$ADMIN_OUT" ]; then
-    info "  Admin creds   : $ADMIN_OUT"
+    info "  Admin creds   : $ADMIN_OUT  (delete after noting; mode 600)"
   fi
   info "  Config dir    : $CONFIG_DIR"
   info "  Data dir      : $DATA_DIR"
