@@ -25,16 +25,16 @@
 #   sh install.sh --admin-pass 'S3cure!'                   # set admin password
 #   sh install.sh --port 9200 --domain cloud.example.com
 #   sh install.sh --smtp-host 172.17.0.1 --smtp-port 25
-#   sh install.sh --collab \
-#       --collabora-domain collabora.example.com \
-#       --wopi-domain      wopiserver.example.com          # enable Collabora editing
+#   sh install.sh --collab --domain cloud.example.com      # enable Collabora editing
+#       # infers collabora.example.com + wopiserver.example.com automatically
 #
 # Notes:
 # - OpenCloud admin username is always 'admin'.
 # - The admin password is written ONCE at first startup via IDM_ADMIN_PASSWORD.
 #   After first start, change it through the web UI; editing .env has no effect.
-# - For collaboration (--collab) your reverse proxy must already serve HTTPS for
-#   --collabora-domain and --wopi-domain before the stack starts.
+# - For collaboration (--collab) the reverse proxy must already serve HTTPS for
+#   collabora.{base-domain} (→ port 9980) and wopiserver.{base-domain} (→ port 9300).
+#   These subdomains are inferred from --domain automatically.
 # - By default we assume a local MTA on the host is reachable at 172.17.0.1:25
 #   from containers. Override via --smtp-host / --smtp-port if needed.
 #
@@ -58,11 +58,10 @@ SMTP_PASS=""
 UPDATE_ONLY="false"
 NON_INTERACTIVE="false"
 ENABLE_COLLAB="false"
-COLLABORA_DOMAIN=""
-WOPISERVER_DOMAIN=""
 COLLABORA_ADMIN_USER="admin"
 COLLABORA_ADMIN_PASS=""
 OC_CONTAINER_UID_GID="1000:1000"
+NETWORK_NAME="opencloud-net"
 
 ########################################
 # Helpers (POSIX)
@@ -106,6 +105,22 @@ has_systemd() {
 
 now_utc() { date -u +"%Y%m%dT%H%M%SZ"; }
 
+# Derive a base domain from a potentially sub-domained hostname.
+# cloud.example.com  → example.com   (strips leading label when 3+ labels present)
+# example.com        → example.com   (unchanged)
+# localhost          → localhost      (unchanged)
+infer_base_domain() {
+  case "$1" in
+    *.*.*)
+      # Three or more labels: strip the first one.
+      printf '%s' "${1#*.}"
+      ;;
+    *)
+      printf '%s' "$1"
+      ;;
+  esac
+}
+
 detect_pm() {
   if [ -r /etc/os-release ]; then
     # shellcheck disable=SC1091
@@ -144,10 +159,9 @@ while [ "$#" -gt 0 ]; do
     --smtp-user)            SMTP_USER="$2";             shift 2 ;;
     --smtp-pass)            SMTP_PASS="$2";             shift 2 ;;
     --collab)               ENABLE_COLLAB="true";       shift 1 ;;
-    --collabora-domain)     COLLABORA_DOMAIN="$2";      shift 2 ;;
-    --wopi-domain)          WOPISERVER_DOMAIN="$2";     shift 2 ;;
     --collabora-admin-user) COLLABORA_ADMIN_USER="$2";  shift 2 ;;
     --collabora-admin-pass) COLLABORA_ADMIN_PASS="$2";  shift 2 ;;
+    --network)              NETWORK_NAME="$2";          shift 2 ;;
     --update)               UPDATE_ONLY="true";         shift 1 ;;
     -y|--yes|--non-interactive) NON_INTERACTIVE="true"; shift 1 ;;
     -h|--help)
@@ -166,10 +180,11 @@ Options:
   --smtp-user USER              SMTP username (if auth enabled)
   --smtp-pass PASS              SMTP password (if auth enabled)
   --collab                      Enable Collabora document collaboration
-  --collabora-domain DOMAIN     Collabora public HTTPS domain (required with --collab)
-  --wopi-domain DOMAIN          WOPI server public HTTPS domain (required with --collab)
   --collabora-admin-user NAME   Collabora admin username (default: admin)
   --collabora-admin-pass PASS   Collabora admin password (default: random)
+  --network NAME                Docker network name (default: opencloud-net)
+                                Created automatically if it does not exist.
+                                Join your reverse proxy to this network to reach OpenCloud.
   --update                      Pull latest images and recreate (with backup)
   -y, --yes                     Non-interactive mode (assume yes)
   -h, --help                    Show this help
@@ -179,29 +194,21 @@ Notes:
   The admin password is applied ONCE at first startup; editing .env afterwards
   has no effect. Use the web UI to change it later.
 
-  For --collab: the reverse proxy must already route HTTPS for both
-  --collabora-domain (→ port 9980) and --wopi-domain (→ port 9300)
-  before the collaboration service can start successfully.
+  For --collab: Collabora subdomains are inferred from --domain automatically.
+  If --domain is cloud.example.com the script configures:
+    collabora.example.com  → port 9980
+    wopiserver.example.com → port 9300
+  Your reverse proxy must route HTTPS for both before the stack starts.
 EOF
       exit 0 ;;
     *) err "Unknown option: $1"; exit 1 ;;
   esac
 done
 
-# Collaboration pre-flight checks
-if [ "$ENABLE_COLLAB" = "true" ]; then
-  if [ -z "$DOMAIN" ]; then
-    err "--collab requires --domain (the public OpenCloud hostname)."
-    exit 1
-  fi
-  if [ -z "$COLLABORA_DOMAIN" ]; then
-    err "--collab requires --collabora-domain."
-    exit 1
-  fi
-  if [ -z "$WOPISERVER_DOMAIN" ]; then
-    err "--collab requires --wopi-domain."
-    exit 1
-  fi
+# Collaboration pre-flight
+if [ "$ENABLE_COLLAB" = "true" ] && [ -z "$DOMAIN" ]; then
+  err "--collab requires --domain (the public OpenCloud hostname)."
+  exit 1
 fi
 
 ########################################
@@ -287,6 +294,15 @@ install_docker_official() {
   fi
 }
 
+ensure_network() {
+  if docker network inspect -- "$NETWORK_NAME" >/dev/null 2>&1; then
+    info "Docker network '$NETWORK_NAME' already exists."
+  else
+    info "Creating Docker network '$NETWORK_NAME'..."
+    docker network create --driver bridge -- "$NETWORK_NAME"
+  fi
+}
+
 ensure_docker() {
   if command -v docker >/dev/null 2>&1; then
     info "Docker is present."
@@ -311,6 +327,10 @@ write_env_file() {
     # INSECURE: true when no domain is set (local/self-signed); false for internet-facing.
     _insecure="${DOMAIN:+false}"
     _insecure="${_insecure:-true}"
+    # Infer Collabora subdomains from the base domain.
+    _base_domain="$(infer_base_domain "${DOMAIN:-localhost}")"
+    _collabora_domain="collabora.${_base_domain}"
+    _wopi_domain="wopiserver.${_base_domain}"
 
     cat > "$ENV_FILE" <<EOF
 # Autogenerated by install.sh on $(date -u)
@@ -367,10 +387,15 @@ SMTP_INSECURE=false
 OC_CONFIG_DIR=$CONFIG_DIR
 OC_DATA_DIR=$DATA_DIR
 
+# --- Docker network ---
+# All OpenCloud containers join this network. Attach your reverse proxy to it.
+OPENCLOUD_NETWORK=$NETWORK_NAME
+
 # --- Collaboration (Collabora + WOPI) ---
-# Only used when the collaboration service is included in compose.yaml.
-COLLABORA_DOMAIN=${COLLABORA_DOMAIN:-collabora.${DOMAIN:-localhost}}
-WOPISERVER_DOMAIN=${WOPISERVER_DOMAIN:-wopiserver.${DOMAIN:-localhost}}
+# Subdomains are inferred from OC_DOMAIN at install time. Only used when
+# the collaboration service is included in compose.yaml.
+COLLABORA_DOMAIN=$_collabora_domain
+WOPISERVER_DOMAIN=$_wopi_domain
 COLLABORA_ADMIN_USER=$COLLABORA_ADMIN_USER
 COLLABORA_ADMIN_PASSWORD=$_collab_pass
 COLLABORA_SSL_ENABLE=false
@@ -529,8 +554,12 @@ EOF
   # --- Shared networks and volumes (always last) ---
   cat >> "$COMPOSE_FILE" <<'EOF'
 networks:
+  # External named network — created by install.sh before compose starts.
+  # Attach your reverse proxy to this network to reach OpenCloud without
+  # exposing extra ports on the host.
   opencloud-net:
-    driver: bridge
+    name: ${OPENCLOUD_NETWORK:-opencloud-net}
+    external: true
 
 volumes:
   opencloud-config:
@@ -587,6 +616,7 @@ wait_for_opencloud() {
 ########################################
 main() {
   ensure_docker
+  ensure_network
   write_env_file
   write_compose_file
 
@@ -614,8 +644,10 @@ main() {
     info "  Public URL    : https://$DOMAIN/"
   fi
   if [ "$ENABLE_COLLAB" = "true" ]; then
-    info "  Collabora     : https://$COLLABORA_DOMAIN/  → proxy to port 9980"
-    info "  WOPI server   : https://$WOPISERVER_DOMAIN/ → proxy to port 9300"
+    _bd="$(infer_base_domain "${DOMAIN:-localhost}")"
+    info "  Collabora     : https://collabora.${_bd}/  → proxy to port 9980"
+    info "  WOPI server   : https://wopiserver.${_bd}/ → proxy to port 9300"
+    info "  Docker network: $NETWORK_NAME  (attach your reverse proxy here)"
   fi
   if [ -f "$ADMIN_OUT" ]; then
     info "  Admin creds   : $ADMIN_OUT"
