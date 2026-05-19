@@ -41,6 +41,14 @@
 set -eu
 umask 027
 
+# Root check — must be root or able to sudo for package installation and
+# writing to /opt (default install path). Fail early with a clear message
+# rather than obscure permission errors mid-install.
+if [ "$(id -u)" != "0" ] && ! command -v sudo >/dev/null 2>&1; then
+  printf "[ERR ] This script requires root or sudo. Re-run as root or install sudo.\n" >&2
+  exit 1
+fi
+
 ########################################
 # Defaults
 ########################################
@@ -56,7 +64,7 @@ SMTP_AUTH=""               # auth method name (e.g. 'plain', 'login'); empty = n
 SMTP_USER=""
 SMTP_PASS=""
 UPDATE_ONLY="false"
-NON_INTERACTIVE="false"
+# NON_INTERACTIVE is intentionally removed — the script never prompts the user
 ENABLE_COLLAB="true"
 COLLABORA_ADMIN_USER="admin"
 COLLABORA_ADMIN_PASS=""
@@ -98,7 +106,9 @@ rand_secret() {
 # Double-quote a value for safe inclusion in a .env file.
 # Escapes embedded backslashes and double-quotes.
 env_quote() {
-  printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  # Escape backslash, double-quote, and dollar-sign for double-quoted dotenv values.
+  # Docker Compose expands $VAR inside double-quoted strings unless $ is escaped as \$.
+  printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\$/\\$/g')"
 }
 
 is_root() {
@@ -207,7 +217,7 @@ while [ "$#" -gt 0 ]; do
       _need_arg "$1" "${2:-}"
       NETWORK_NAME="$2"; shift 2 ;;
     --update)               UPDATE_ONLY="true";         shift 1 ;;
-    -y|--yes|--non-interactive) NON_INTERACTIVE="true"; shift 1 ;;
+    -y|--yes|--non-interactive) shift 1 ;;  # kept for compatibility; script never prompts
     -h|--help)
       cat <<EOF
 OpenCloud Installer / Updater (POSIX sh)
@@ -231,7 +241,6 @@ Options:
                                 Created automatically if it does not exist.
                                 Join your reverse proxy to this network to reach OpenCloud.
   --update                      Pull latest images and recreate (with backup)
-  -y, --yes                     Non-interactive mode (assume yes)
   -h, --help                    Show this help
 
 Notes:
@@ -268,16 +277,19 @@ if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
   err "--port must be between 1 and 65535 (got: $PORT)."; exit 1
 fi
 
-# Validate --smtp-port similarly.
+# Validate --smtp-port: same 1-65535 range check as --port.
 case "$SMTP_PORT" in
   *[!0-9]*|'')
-    err "--smtp-port must be a number (got: '$SMTP_PORT')."; exit 1 ;;
+    err "--smtp-port must be a number between 1 and 65535 (got: '$SMTP_PORT')."; exit 1 ;;
 esac
+if [ "$SMTP_PORT" -lt 1 ] || [ "$SMTP_PORT" -gt 65535 ]; then
+  err "--smtp-port must be between 1 and 65535 (got: $SMTP_PORT)."; exit 1
+fi
 
-# Normalise domain: lowercase, strip trailing dot.
+# Normalise domain: lowercase only (trailing dot is rejected below — it causes
+# issues in HTTP URLs and TLS SAN matching, so treat it as a typo).
 if [ -n "$DOMAIN" ]; then
   DOMAIN="$(printf '%s' "$DOMAIN" | tr '[:upper:]' '[:lower:]')"
-  DOMAIN="${DOMAIN%.}"   # strip trailing dot (valid DNS FQDN notation but invalid in HTTP URLs)
   # Reject spaces and shell metacharacters.
   case "$DOMAIN" in
     *' '*|*'	'*)
@@ -296,10 +308,18 @@ if [ -n "$DOMAIN" ]; then
   if [ -n "$_dom_check" ]; then
     err "Invalid domain '$DOMAIN': only letters, digits, hyphens, and dots are allowed."; exit 1
   fi
-  # Reject leading or trailing hyphens in any label, and leading dots.
+  # Reject consecutive dots (empty labels, e.g. foo..bar.com).
   case "$DOMAIN" in
-    .*|*.) err "Invalid domain '$DOMAIN': must not start or end with a dot."; exit 1 ;;
-    -*|*-) err "Invalid domain '$DOMAIN': must not start or end with a hyphen."; exit 1 ;;
+    *..*)      err "Invalid domain '$DOMAIN': consecutive dots (empty label) are not allowed."; exit 1 ;;
+  esac
+  # Reject leading or trailing hyphens in any label, and leading/trailing dots.
+  # Patterns:  .*|*.  = domain starts/ends with a dot
+  #            -*|*-  = first/last label starts/ends with a hyphen
+  #            *-.*   = interior label ends with a hyphen (e.g. bad-.com)
+  #            *.-*   = interior label starts with a hyphen (e.g. foo.-bar.com)
+  case "$DOMAIN" in
+    .*|*.)     err "Invalid domain '$DOMAIN': must not start or end with a dot."; exit 1 ;;
+    -*|*-|*-.*|*.-*) err "Invalid domain '$DOMAIN': must not start or end with a hyphen."; exit 1 ;;
   esac
 fi
 
@@ -399,9 +419,17 @@ install_docker_official() {
 ensure_network() {
   if docker network inspect -- "$NETWORK_NAME" >/dev/null 2>&1; then
     info "Docker network '$NETWORK_NAME' already exists."
-  else
-    info "Creating Docker network '$NETWORK_NAME'..."
-    docker network create --driver bridge -- "$NETWORK_NAME"
+    return 0
+  fi
+  info "Creating Docker network '$NETWORK_NAME'..."
+  # Suppress and re-check: a parallel create or a stale external network that
+  # inspect missed (rare but possible with bridge networks) would fail create
+  # with "already exists". If create fails, verify the network is now reachable;
+  # error only if it truly cannot be found.
+  docker network create --driver bridge -- "$NETWORK_NAME" >/dev/null 2>&1 || true
+  if ! docker network inspect -- "$NETWORK_NAME" >/dev/null 2>&1; then
+    err "Failed to create or find Docker network '$NETWORK_NAME'."
+    exit 1
   fi
 }
 
@@ -565,7 +593,11 @@ write_compose_file() {
   fi
 
   # --- Base: opencloud service ---
+  # NOTE: This file is auto-generated by install.sh on every run.
+  # Do not edit it directly — changes will be overwritten.
+  # Customise .env (preserved across runs) or re-run install.sh instead.
   cat > "$COMPOSE_FILE" <<'EOF'
+# Auto-generated by install.sh — do not edit; re-run install.sh to regenerate.
 ---
 services:
 
@@ -729,6 +761,14 @@ snapshot_backup() {
   info "Creating backup snapshot at $_bdir ..."
   mkdir -p "$_bdir"
 
+  # Credentials and env (critical — failure is fatal for the backup)
+  for _f in ".env" "admin.credentials"; do
+    if [ -f "$COMPOSE_DIR/$_f" ]; then
+      cp -- "$COMPOSE_DIR/$_f" "$_bdir/$_f" 2>/dev/null || \
+        warn "Could not back up $_f; continuing."
+    fi
+  done
+
   # Config snapshot
   tar -C "$COMPOSE_DIR" -czf "$_bdir/config.tgz" "$(basename "$CONFIG_DIR")" 2>/dev/null || \
     warn "Config backup failed; continuing."
@@ -762,12 +802,21 @@ wait_for_opencloud() {
   done
   warn "OpenCloud did not respond within 5 minutes."
   warn "Check logs: cd $COMPOSE_DIR && docker compose logs -f opencloud"
+  return 1
 }
 
 ########################################
 # Main flow
 ########################################
 main() {
+  # Guard: --update on a path with no existing installation is almost always
+  # a typo (wrong --path). Warn loudly so the user can abort.
+  if [ "$UPDATE_ONLY" = "true" ] && [ ! -f "$ENV_FILE" ]; then
+    warn "--update specified but no existing installation found at $COMPOSE_DIR"
+    warn "(no .env found). Creating a fresh installation. Use Ctrl-C to abort."
+    sleep 3
+  fi
+
   ensure_docker
   ensure_network
   write_env_file
@@ -787,7 +836,8 @@ main() {
     docker compose up -d
   fi
 
-  wait_for_opencloud
+  _oc_up=true
+  wait_for_opencloud || _oc_up=false
 
   # If --domain / --port were not passed, read them from the existing .env so
   # the summary reflects the actual configured values rather than defaults.
@@ -812,9 +862,14 @@ main() {
   fi
 
   info ""
-  info "OpenCloud is up. Summary:"
+  if [ "$_oc_up" = "true" ]; then
+    info "OpenCloud is up. Summary:"
+  else
+    warn "OpenCloud did not come up within the timeout. Summary (check logs above):"
+  fi
   info "  Compose dir   : $COMPOSE_DIR"
   info "  Port (HTTP)   : 127.0.0.1:$PORT  (attach your reverse proxy)"
+  info "  Docker network: $NETWORK_NAME  (attach your reverse proxy here)"
   if [ -n "$DOMAIN" ]; then
     info "  Public URL    : ${_sum_scheme}://$DOMAIN/"
   fi
@@ -822,7 +877,6 @@ main() {
     _bd="$(infer_base_domain "${DOMAIN:-localhost}")"
     info "  Collabora     : ${_sum_scheme}://collabora.${_bd}/  → proxy to port 9980"
     info "  WOPI server   : ${_sum_scheme}://wopiserver.${_bd}/ → proxy to port 9300"
-    info "  Docker network: $NETWORK_NAME  (attach your reverse proxy here)"
   fi
   if [ -f "$ADMIN_OUT" ]; then
     info "  Admin creds   : $ADMIN_OUT  (delete after noting; mode 600)"
@@ -834,7 +888,7 @@ main() {
   info "To manage:"
   info "  cd $COMPOSE_DIR && docker compose ps"
   info "  cd $COMPOSE_DIR && docker compose logs -f opencloud"
-  info "  sh $0 --update --path $COMPOSE_DIR"
+  info "  sh install.sh --update --path $COMPOSE_DIR  # re-download install.sh to update"
 }
 
 main "$@"
