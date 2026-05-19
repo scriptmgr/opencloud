@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:docs.opencloud.eu)"
+      "WebFetch(domain:docs.opencloud.eu)",
+      "Bash(shellcheck -s sh /root/Projects/github/scriptmgr/opencloud/install.sh)"
     ]
   }
 }
