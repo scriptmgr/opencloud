@@ -25,8 +25,8 @@
 #   sh install.sh --admin-pass 'S3cure!'                   # set admin password
 #   sh install.sh --port 9200 --domain cloud.example.com
 #   sh install.sh --smtp-host 172.17.0.1 --smtp-port 25
-#   sh install.sh --collab --domain cloud.example.com      # enable Collabora editing (requires --domain)
-#       # infers collabora.example.com + wopiserver.example.com automatically
+#   sh install.sh --no-collab                              # disable Collabora editing
+#   sh install.sh --domain cloud.example.com               # infers collabora.example.com + wopiserver.example.com
 #
 # Notes:
 # - OpenCloud admin username is always 'admin'.
@@ -57,7 +57,7 @@ SMTP_USER=""
 SMTP_PASS=""
 UPDATE_ONLY="false"
 NON_INTERACTIVE="false"
-ENABLE_COLLAB="false"
+ENABLE_COLLAB="true"
 COLLABORA_ADMIN_USER="admin"
 COLLABORA_ADMIN_PASS=""
 OC_CONTAINER_UID_GID="1000:1000"
@@ -195,7 +195,8 @@ while [ "$#" -gt 0 ]; do
     --smtp-pass)
       _need_arg "$1" "${2:-}"
       SMTP_PASS="$2"; shift 2 ;;
-    --collab)               ENABLE_COLLAB="true";       shift 1 ;;
+    --collab)               ENABLE_COLLAB="true";  _collab_explicit="true"; shift 1 ;;
+    --no-collab)            ENABLE_COLLAB="false"; _collab_explicit="true"; shift 1 ;;
     --collabora-admin-user)
       _need_arg "$1" "${2:-}"
       COLLABORA_ADMIN_USER="$2"; shift 2 ;;
@@ -222,8 +223,8 @@ Options:
   --smtp-auth METHOD            SMTP auth method, e.g. 'plain' or 'login' (default: none)
   --smtp-user USER              SMTP username (if auth enabled)
   --smtp-pass PASS              SMTP password (if auth enabled)
-  --collab                      Enable Collabora document collaboration
-                                  (requires --domain)
+  --collab                      Enable Collabora document collaboration (default: on)
+  --no-collab                   Disable Collabora document collaboration
   --collabora-admin-user NAME   Collabora admin username (default: admin)
   --collabora-admin-pass PASS   Collabora admin password (default: random)
   --network NAME                Docker network name (default: opencloud-net)
@@ -238,11 +239,13 @@ Notes:
   The admin password is applied ONCE at first startup; editing .env afterwards
   has no effect. Use the web UI to change it later.
 
-  For --collab (requires --domain): Collabora subdomains are inferred from
-  --domain automatically. If --domain is cloud.example.com the script configures:
+  Collabora is enabled by default. Use --no-collab to disable it.
+  Collabora subdomains are inferred from --domain automatically.
+  If --domain is cloud.example.com the script configures:
     collabora.example.com  → port 9980
     wopiserver.example.com → port 9300
-  Your reverse proxy must route HTTPS for both before the stack starts.
+  Without --domain, collabora.localhost and wopiserver.localhost are used.
+  Your reverse proxy must route both subdomains to the container ports.
 
   When --domain is empty or a single-label hostname (e.g. localhost, myserver),
   INSECURE=true and http:// URLs are used — suitable for local testing only.
@@ -300,11 +303,9 @@ if [ -n "$DOMAIN" ]; then
   esac
 fi
 
-# Collaboration pre-flight: --collab needs a real domain to infer subdomains from.
-if [ "$ENABLE_COLLAB" = "true" ] && [ -z "$DOMAIN" ]; then
-  err "--collab requires --domain (the public OpenCloud hostname)."
-  exit 1
-fi
+# No domain pre-flight needed for --collab: subdomains are inferred from DOMAIN
+# (falling back to *.localhost), and the reverse proxy handles routing to the
+# container ports regardless of whether a real domain is configured.
 
 ########################################
 # Directory layout
@@ -357,7 +358,13 @@ install_docker_official() {
       need_cmd dnf
       sudocmd "dnf -y install dnf-plugins-core"
       _distro_id="$(. /etc/os-release; echo "$ID")"
-      sudocmd "dnf config-manager --add-repo https://download.docker.com/linux/${_distro_id}/docker-ce.repo"
+      # Docker publishes repos for 'centos' and 'fedora' only.
+      # AlmaLinux, Rocky, and other RHEL rebuilds must use the centos repo.
+      case "$_distro_id" in
+        fedora) _docker_repo_id="fedora" ;;
+        *)      _docker_repo_id="centos" ;;
+      esac
+      sudocmd "dnf config-manager --add-repo https://download.docker.com/linux/${_docker_repo_id}/docker-ce.repo"
       sudocmd "dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
       ;;
     yum)
@@ -545,13 +552,15 @@ EOF
 # Compose file
 ########################################
 write_compose_file() {
-  # Idempotency guard: if compose.yaml already contains Collabora services and
-  # --collab was not passed, preserve them to avoid silent service removal.
-  if [ "$ENABLE_COLLAB" = "false" ] && [ -f "$COMPOSE_FILE" ]; then
+  # Idempotency guard: honour the existing compose.yaml's Collabora state when
+  # neither --collab nor --no-collab was passed explicitly on the command line.
+  # This prevents a plain re-run or --update from silently adding or removing
+  # Collabora services that the operator deliberately chose.
+  if [ -f "$COMPOSE_FILE" ] && [ "${_collab_explicit:-false}" = "false" ]; then
     if grep -q -- 'container_name: opencloud-collaboration' "$COMPOSE_FILE" 2>/dev/null; then
-      warn "Existing compose.yaml includes Collabora services."
-      warn "Preserving them (pass --collab explicitly to confirm or edit compose.yaml to remove)."
       ENABLE_COLLAB="true"
+    else
+      ENABLE_COLLAB="false"
     fi
   fi
 
@@ -779,6 +788,21 @@ main() {
   fi
 
   wait_for_opencloud
+
+  # If --domain / --port were not passed, read them from the existing .env so
+  # the summary reflects the actual configured values rather than defaults.
+  if [ -f "$ENV_FILE" ]; then
+    if [ -z "$DOMAIN" ]; then
+      _env_domain="$(grep -- '^OC_DOMAIN=' "$ENV_FILE" | cut -d= -f2- | tr -d '"')"
+      if [ -n "$_env_domain" ] && [ "$_env_domain" != "localhost" ]; then
+        DOMAIN="$_env_domain"
+      fi
+    fi
+    _env_port="$(grep -- '^OPENCLOUD_HTTP_PORT=' "$ENV_FILE" | cut -d= -f2- | tr -d '"')"
+    if [ -n "$_env_port" ]; then
+      PORT="$_env_port"
+    fi
+  fi
 
   # Derive display scheme from domain (mirrors write_env_file logic).
   if [ -z "$DOMAIN" ] || [ "${DOMAIN%%.*}" = "$DOMAIN" ]; then
