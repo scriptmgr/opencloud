@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # shellcheck shell=sh
 # - - - - - - - - - - - - - - - - - - - - - - - - -
-##@Version           :  202605191054-git
+##@Version           :  202605191700-git
 # @@Author           :  Jason Hempstead
 # @@Contact          :  git-admin@casjaysdev.pro
 # @@License          :  MIT or LICENSE.md
@@ -20,7 +20,7 @@
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 # shellcheck disable=SC1001,SC1003,SC1091,SC2001,SC2003,SC2016,SC2031,SC2034,SC2090,SC2115,SC2120,SC2155,SC2199,SC2229,SC2317,SC2329
 # - - - - - - - - - - - - - - - - - - - - - - - - -
-VERSION="202605191054-git"
+VERSION="202605191700-git"
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 APPNAME="${0##*/}"
 RUN_USER="${USER:-root}"
@@ -109,6 +109,66 @@ __has_systemd() {
 }
 
 __now_utc() { date -u +"%Y%m%dT%H%M%SZ"; }
+
+# Returns the runtime FQDN via hostname -f. Returns 1 if unavailable.
+__determine_hostname_name() {
+  _fqdn="$(hostname -f 2>/dev/null)"
+  if [ -n "$_fqdn" ]; then
+    printf '%s\n' "$_fqdn"
+    return 0
+  fi
+  return 1
+}
+
+# Returns the runtime domain name. Tries hostname -d first; falls back to
+# stripping the first label from hostname -f. Returns 1 if both fail.
+__determine_domain_name() {
+  _domain="$(hostname -d 2>/dev/null)"
+  if [ -n "$_domain" ]; then
+    printf '%s\n' "$_domain"
+    return 0
+  fi
+  _fqdn="$(hostname -f 2>/dev/null)"
+  if [ -n "$_fqdn" ] && [ "$_fqdn" != "${_fqdn#*.}" ]; then
+    printf '%s\n' "${_fqdn#*.}"
+    return 0
+  fi
+  return 1
+}
+
+# Returns 0 if $1 is a valid FQDN (at least two labels, each 1-63 chars,
+# alphanumeric + interior hyphens, total length <= 253). Returns 1 otherwise.
+__validate_fqdn() {
+  _vf="${1:-}"
+  [ -z "$_vf" ] && return 1
+  [ "${#_vf}" -gt 253 ] && return 1
+  # Must contain at least one dot (two or more labels).
+  case "$_vf" in
+    *.*) ;;
+    *) return 1 ;;
+  esac
+  # Reject leading/trailing dots or hyphens and consecutive dots.
+  case "$_vf" in
+    .*|*.) return 1 ;;
+    -*|*-) return 1 ;;
+    *..*) return 1 ;;
+  esac
+  # Each label: 1-63 chars, alphanumeric + interior hyphens only.
+  _vf_rest="$_vf"
+  while [ -n "$_vf_rest" ]; do
+    _label="${_vf_rest%%.*}"
+    _vf_rest="${_vf_rest#*.}"
+    [ "$_vf_rest" = "$_label" ] && _vf_rest=""
+    [ -z "$_label" ] && return 1
+    [ "${#_label}" -gt 63 ] && return 1
+    _stripped="$(printf '%s' "$_label" | tr -d 'A-Za-z0-9-')"
+    [ -n "$_stripped" ] && return 1
+    case "$_label" in
+      -*|*-) return 1 ;;
+    esac
+  done
+  return 0
+}
 
 # Derive a base domain from a potentially sub-domained hostname.
 # cloud.example.com  → example.com   (strips leading label when 3+ labels present)
@@ -307,6 +367,20 @@ __parse_args "$@"
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 # Post-parse validation and normalisation
 # - - - - - - - - - - - - - - - - - - - - - - - - -
+
+# Auto-detect domain from the host's FQDN when --domain was not supplied.
+# Uses __determine_hostname_name (hostname -f) as the primary source.
+# Only accepts the result if it is a valid FQDN (two or more labels).
+if [ -z "$INSTALL_DOMAIN" ]; then
+  _detected_fqdn="$(__determine_hostname_name 2>/dev/null || true)"
+  if [ -n "$_detected_fqdn" ] && __validate_fqdn "$_detected_fqdn"; then
+    INSTALL_DOMAIN="$_detected_fqdn"
+    __info "Auto-detected domain from hostname: $INSTALL_DOMAIN"
+  else
+    __warn "Could not auto-detect a valid FQDN from 'hostname -f' (got: '${_detected_fqdn:-none}')."
+    __warn "Running in insecure/local mode. Pass --domain to set a real domain."
+  fi
+fi
 
 # Validate --port: must be a positive integer in range 1-65535.
 case "$INSTALL_PORT" in
@@ -698,6 +772,10 @@ services:
       NOTIFICATIONS_SMTP_AUTHENTICATION: "${SMTP_AUTHENTICATION:-}"
       NOTIFICATIONS_SMTP_ENCRYPTION: "${SMTP_TRANSPORT_ENCRYPTION:-none}"
       FRONTEND_ARCHIVER_MAX_SIZE: "10000000000"
+      # NATS must bind on all interfaces so the collaboration container
+      # (running in a separate container on the same Docker network) can
+      # register with the NATS-JetStream service registry.
+      NATS_NATS_HOST: "0.0.0.0"
     volumes:
       - ${OC_CONFIG_DIR:-opencloud-config}:/etc/opencloud
       - ${OC_DATA_DIR:-opencloud-data}:/var/lib/opencloud
