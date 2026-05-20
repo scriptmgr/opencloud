@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # shellcheck shell=sh
 # - - - - - - - - - - - - - - - - - - - - - - - - -
-##@Version           :  202605201910-git
+##@Version           :  202605201915-git
 # @@Author           :  Jason Hempstead
 # @@Contact          :  git-admin@casjaysdev.pro
 # @@License          :  MIT or LICENSE.md
@@ -20,7 +20,7 @@
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 # shellcheck disable=SC1001,SC1003,SC1091,SC2001,SC2003,SC2016,SC2031,SC2034,SC2090,SC2115,SC2120,SC2155,SC2199,SC2229,SC2317,SC2329
 # - - - - - - - - - - - - - - - - - - - - - - - - -
-VERSION="202605201910-git"
+VERSION="202605201915-git"
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 APPNAME="${0##*/}"
 RUN_USER="${USER:-root}"
@@ -691,7 +691,7 @@ START_ADDITIONAL_SERVICES=notifications
 # --- SMTP / email notifications ---
 SMTP_HOST=$INSTALL_SMTP_HOST
 SMTP_PORT=$INSTALL_SMTP_PORT
-SMTP_SENDER=OpenCloud <no-reply@${INSTALL_DOMAIN:-localhost}>
+SMTP_SENDER=My Cloud <no-reply@${INSTALL_DOMAIN:-localhost}>
 SMTP_USERNAME=$INSTALL_SMTP_USER
 SMTP_PASSWORD=${_smtp_pass_q}
 SMTP_AUTHENTICATION=$INSTALL_SMTP_AUTH
@@ -798,7 +798,7 @@ services:
       IDM_ADMIN_USER_EMAIL: "${ADMIN_EMAIL:-admin@localhost}"
       NOTIFICATIONS_SMTP_HOST: "${SMTP_HOST:-172.17.0.1}"
       NOTIFICATIONS_SMTP_PORT: "${SMTP_PORT:-25}"
-      NOTIFICATIONS_SMTP_SENDER: "${SMTP_SENDER:-OpenCloud <no-reply@localhost>}"
+      NOTIFICATIONS_SMTP_SENDER: "${SMTP_SENDER:-My Cloud <no-reply@localhost>}"
       NOTIFICATIONS_SMTP_USERNAME: "${SMTP_USERNAME:-}"
       NOTIFICATIONS_SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
       NOTIFICATIONS_SMTP_INSECURE: "${SMTP_INSECURE:-false}"
