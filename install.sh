@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # shellcheck shell=sh
 # - - - - - - - - - - - - - - - - - - - - - - - - -
-##@Version           :  202605201925-git
+##@Version           :  202605202000-git
 # @@Author           :  Jason Hempstead
 # @@Contact          :  git-admin@casjaysdev.pro
 # @@License          :  MIT or LICENSE.md
@@ -20,7 +20,7 @@
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 # shellcheck disable=SC1001,SC1003,SC1091,SC2001,SC2003,SC2016,SC2031,SC2034,SC2090,SC2115,SC2120,SC2155,SC2199,SC2229,SC2317,SC2329
 # - - - - - - - - - - - - - - - - - - - - - - - - -
-VERSION="202605201925-git"
+VERSION="202605202000-git"
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 APPNAME="${0##*/}"
 RUN_USER="${USER:-root}"
@@ -790,13 +790,10 @@ services:
       OC_LOG_PRETTY: "${LOG_PRETTY:-false}"
       PROXY_TLS: "false"
       OC_INSECURE: "${INSECURE:-false}"
-      PROXY_ENABLE_BASIC_AUTH: "false"
+      # Basic auth is required for WebDAV desktop clients and the post-init admin profile patch.
+      PROXY_ENABLE_BASIC_AUTH: "true"
       IDM_CREATE_DEMO_USERS: "${DEMO_USERS:-false}"
       IDM_ADMIN_PASSWORD: "${INITIAL_ADMIN_PASSWORD}"
-      # Set the admin user email to the configured domain (best-effort; honored by OpenCloud IDM).
-      # NOTE: OpenCloud's built-in login username is 'admin' (hardcoded). ADMIN_USER only
-      # controls the email address and display name — rename via the web UI after first login.
-      IDM_ADMIN_USER_EMAIL: "${ADMIN_EMAIL:-admin@localhost}"
       NOTIFICATIONS_SMTP_HOST: "${SMTP_HOST:-172.17.0.1}"
       NOTIFICATIONS_SMTP_PORT: "${SMTP_PORT:-25}"
       NOTIFICATIONS_SMTP_SENDER: "${SMTP_SENDER:-My Cloud <no-reply@localhost>}"
@@ -981,6 +978,63 @@ __wait_for_opencloud() {
 }
 
 # - - - - - - - - - - - - - - - - - - - - - - - - -
+# Patch admin user profile via Graph API
+# Sets display name and email after first startup.
+# Requires PROXY_ENABLE_BASIC_AUTH=true (set in compose.yaml by this script).
+# - - - - - - - - - - - - - - - - - - - - - - - - -
+__patch_admin_user() {
+  # Read admin credentials from .env (password) and opencloud config (user ID).
+  _patch_pass="$(sed -n 's/^INITIAL_ADMIN_PASSWORD="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$INSTALL_ENV_FILE")"
+  _oc_config="$INSTALL_CONFIG_DIR/../config/opencloud.yaml"
+  # Config lives in $INSTALL_CONFIG_DIR which is mounted at /etc/opencloud inside the container.
+  # On the host it is at $INSTALL_CONFIG_DIR.
+  _oc_yaml=""
+  if [ -f "$INSTALL_CONFIG_DIR/../opencloud.yaml" ]; then
+    _oc_yaml="$INSTALL_CONFIG_DIR/../opencloud.yaml"
+  elif [ -f "$INSTALL_CONFIG_DIR/opencloud.yaml" ]; then
+    _oc_yaml="$INSTALL_CONFIG_DIR/opencloud.yaml"
+  fi
+
+  _patch_uid=""
+  if [ -n "$_oc_yaml" ]; then
+    _patch_uid="$(grep -- 'admin_user_id:' "$_oc_yaml" 2>/dev/null | awk '{print $2}' | head -1)"
+  fi
+
+  if [ -z "$_patch_uid" ]; then
+    # Fall back to reading from inside the container.
+    _patch_uid="$(docker exec opencloud-app grep 'admin_user_id:' /etc/opencloud/opencloud.yaml 2>/dev/null | awk '{print $2}' | head -1)"
+  fi
+
+  if [ -z "$_patch_uid" ] || [ -z "$_patch_pass" ]; then
+    __warn "Could not determine admin user ID or password; skipping profile patch."
+    __warn "Update display name and email manually in the web UI."
+    return 0
+  fi
+
+  # Read target display name and email from .env.
+  _patch_name="$(sed -n 's/^ADMIN_USER="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$INSTALL_ENV_FILE")"
+  _patch_email="$(sed -n 's/^ADMIN_EMAIL="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$INSTALL_ENV_FILE")"
+  _patch_name="${_patch_name:-administrator}"
+  _patch_email="${_patch_email:-administrator@localhost}"
+
+  __info "Patching admin user profile (display name: $_patch_name, email: $_patch_email)..."
+
+  _patch_resp="$(curl -q -LSs -X PATCH \
+    "http://127.0.0.1:${INSTALL_PORT}/graph/v1.0/users/${_patch_uid}" \
+    -u "admin:${_patch_pass}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"displayName\":\"${_patch_name}\",\"mail\":\"${_patch_email}\"}" \
+    -w '\n%{http_code}' 2>/dev/null)"
+
+  _patch_code="$(printf '%s' "$_patch_resp" | tail -1)"
+  if [ "$_patch_code" = "200" ]; then
+    __info "Admin profile updated successfully."
+  else
+    __warn "Admin profile patch returned HTTP $_patch_code — update manually in the web UI."
+  fi
+}
+
+# - - - - - - - - - - - - - - - - - - - - - - - - -
 # Main flow
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 __main() {
@@ -1013,6 +1067,12 @@ __main() {
 
   _oc_up=true
   __wait_for_opencloud || _oc_up=false
+
+  # Patch the admin user's display name and email via the Graph API.
+  # Only runs on fresh installs (idempotent: safe to re-run, just a no-op PATCH).
+  if [ "$_oc_up" = "true" ]; then
+    __patch_admin_user
+  fi
 
   # If --domain / --port were not passed, read them from the existing .env so
   # the summary reflects the actual configured values rather than defaults.
