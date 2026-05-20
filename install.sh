@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # shellcheck shell=sh
 # - - - - - - - - - - - - - - - - - - - - - - - - -
-##@Version           :  202605191700-git
+##@Version           :  202605201900-git
 # @@Author           :  Jason Hempstead
 # @@Contact          :  git-admin@casjaysdev.pro
 # @@License          :  MIT or LICENSE.md
@@ -20,7 +20,7 @@
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 # shellcheck disable=SC1001,SC1003,SC1091,SC2001,SC2003,SC2016,SC2031,SC2034,SC2090,SC2115,SC2120,SC2155,SC2199,SC2229,SC2317,SC2329
 # - - - - - - - - - - - - - - - - - - - - - - - - -
-VERSION="202605191700-git"
+VERSION="202605201900-git"
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 APPNAME="${0##*/}"
 RUN_USER="${USER:-root}"
@@ -43,8 +43,12 @@ fi
 # Defaults
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 INSTALL_PREFIX="/opt/opencloud"
-INSTALL_ADMIN_USER="admin"
+# NOTE: OpenCloud's built-in login username is always 'admin' (hardcoded by OpenCloud).
+# INSTALL_ADMIN_USER controls the email address and the credentials file label only.
+# You can rename the admin user in the web UI after first login.
+INSTALL_ADMIN_USER="administrator"
 INSTALL_ADMIN_PASS=""
+INSTALL_ADMIN_EMAIL=""            # computed post-parse: ${INSTALL_ADMIN_USER}@${INSTALL_DOMAIN}
 INSTALL_PORT="9200"
 INSTALL_DOMAIN=""
 INSTALL_SMTP_HOST="172.17.0.1"   # Docker bridge gateway on Linux
@@ -56,7 +60,7 @@ INSTALL_SMTP_PASS=""
 INSTALL_UPDATE_ONLY="false"
 INSTALL_ENABLE_COLLAB="true"
 INSTALL_COLLAB_EXPLICIT="false"   # true when --collab or --no-collab was passed explicitly
-INSTALL_COLLABORA_ADMIN_USER="admin"
+INSTALL_COLLABORA_ADMIN_USER="administrator"
 INSTALL_COLLABORA_ADMIN_PASS=""
 INSTALL_OC_CONTAINER_UID_GID="1000:1000"
 INSTALL_NETWORK_NAME="opencloud-net"
@@ -197,9 +201,10 @@ Usage: sh ${APPNAME} [OPTIONS]
 
 Options:
   --path DIR, --prefix DIR      Install root (default: /opt/opencloud)
+  --admin-user NAME             Admin label and email prefix (default: administrator)
   --admin-pass PASS             Admin password (default: random on first setup)
   --port N                      Host port to bind (default: 9200)
-  --domain HOST                 Public hostname (sets OC_DOMAIN)
+  --domain HOST                 Public hostname (sets OC_DOMAIN; auto-detected from hostname -f)
   --smtp-host HOST              SMTP relay host (default: 172.17.0.1)
   --smtp-port PORT              SMTP relay port (default: 25)
   --smtp-secure MODE            'none', 'starttls', or 'ssltls' (default: none)
@@ -208,7 +213,7 @@ Options:
   --smtp-pass PASS              SMTP password (if auth enabled)
   --collab                      Enable Collabora document collaboration (default: on)
   --no-collab                   Disable Collabora document collaboration
-  --collabora-admin-user NAME   Collabora admin username (default: admin)
+  --collabora-admin-user NAME   Collabora admin username (default: administrator)
   --collabora-admin-pass PASS   Collabora admin password (default: random)
   --network NAME                Docker network name (default: opencloud-net)
                                 Created automatically if it does not exist.
@@ -218,9 +223,15 @@ Options:
   -v, --version                 Show version and exit
 
 Notes:
-  OpenCloud admin username is always 'admin'.
+  OpenCloud's built-in login username is always 'admin' (hardcoded by OpenCloud at init
+  time — there is no env var to override it). --admin-user sets the admin email address
+  (admin@DOMAIN by default) and the credentials file label only. To use a custom username,
+  log in as 'admin' and rename the account in the web UI Administration settings.
+
   The admin password is applied ONCE at first startup; editing .env afterwards
-  has no effect. Use the web UI to change it later.
+  has no effect. Use the web UI or 'opencloud idm resetpassword' to change it.
+
+  Access the administration panel at: https://DOMAIN/settings/admin-settings
 
   Collabora is enabled by default. Use --no-collab to disable it.
   Collabora subdomains are inferred from --domain automatically.
@@ -261,6 +272,13 @@ __parse_args() {
             [ -z "${_optval:-}" ] && { __err "Option --${OPTARG} requires a value."; exit 1; }
             case "${_optval}" in -*) __err "Option --${OPTARG} requires a value (got flag '${_optval}' instead)."; exit 1 ;; esac
             INSTALL_PREFIX="${_optval}" ;;
+
+          admin-user)
+            _idx="$OPTIND"; OPTIND=$((OPTIND + 1))
+            eval "_optval=\${${_idx}:-}"
+            [ -z "${_optval:-}" ] && { __err "Option --${OPTARG} requires a value."; exit 1; }
+            case "${_optval}" in -*) __err "Option --${OPTARG} requires a value (got flag '${_optval}' instead)."; exit 1 ;; esac
+            INSTALL_ADMIN_USER="${_optval}" ;;
 
           admin-pass)
             _idx="$OPTIND"; OPTIND=$((OPTIND + 1))
@@ -380,6 +398,12 @@ if [ -z "$INSTALL_DOMAIN" ]; then
     __warn "Could not auto-detect a valid FQDN from 'hostname -f' (got: '${_detected_fqdn:-none}')."
     __warn "Running in insecure/local mode. Pass --domain to set a real domain."
   fi
+fi
+
+# Compute admin email from user + domain (if not explicitly set).
+# This is used for SMTP sender and passed to OpenCloud as IDM_ADMIN_USER_EMAIL.
+if [ -z "$INSTALL_ADMIN_EMAIL" ]; then
+  INSTALL_ADMIN_EMAIL="${INSTALL_ADMIN_USER}@${INSTALL_DOMAIN:-localhost}"
 fi
 
 # Validate --port: must be a positive integer in range 1-65535.
@@ -644,7 +668,11 @@ PROXY_TLS=false
 INSECURE=$_insecure
 
 # --- Admin credentials (applied on FIRST start only) ---
+# NOTE: OpenCloud's built-in login username is always 'admin' (hardcoded).
+# ADMIN_USER and ADMIN_EMAIL are used for the user profile and email address.
 # To change later: use the web UI — editing this file has no effect.
+ADMIN_USER=$INSTALL_ADMIN_USER
+ADMIN_EMAIL=$INSTALL_ADMIN_EMAIL
 INITIAL_ADMIN_PASSWORD=${_admin_pass_q}
 
 # --- Demo users (never enable in production) ---
@@ -663,7 +691,7 @@ START_ADDITIONAL_SERVICES=notifications
 # --- SMTP / email notifications ---
 SMTP_HOST=$INSTALL_SMTP_HOST
 SMTP_PORT=$INSTALL_SMTP_PORT
-SMTP_SENDER=OpenCloud Notifications <notifications@${INSTALL_DOMAIN:-localhost}>
+SMTP_SENDER=OpenCloud <noreply@${INSTALL_DOMAIN:-localhost}>
 SMTP_USERNAME=$INSTALL_SMTP_USER
 SMTP_PASSWORD=${_smtp_pass_q}
 SMTP_AUTHENTICATION=$INSTALL_SMTP_AUTH
@@ -696,7 +724,8 @@ EOF
     __info ".env written."
 
     if [ ! -s "$INSTALL_ADMIN_OUT" ]; then
-      printf "Admin user: %s\nAdmin pass: %s\n" "$INSTALL_ADMIN_USER" "$_admin_pass" > "$INSTALL_ADMIN_OUT"
+      printf "Login username: admin\nDisplay name : %s\nAdmin email  : %s\nAdmin pass   : %s\n" \
+        "$INSTALL_ADMIN_USER" "$INSTALL_ADMIN_EMAIL" "$_admin_pass" > "$INSTALL_ADMIN_OUT"
       if [ "$INSTALL_ENABLE_COLLAB" = "true" ]; then
         printf "Collabora admin user: %s\nCollabora admin pass: %s\n" \
           "$INSTALL_COLLABORA_ADMIN_USER" "$_collab_pass" >> "$INSTALL_ADMIN_OUT"
@@ -752,7 +781,7 @@ services:
     ports:
       - "127.0.0.1:${OPENCLOUD_HTTP_PORT:-9200}:9200"
     environment:
-      OC_ADD_RUN_SERVICES: ${START_ADDITIONAL_SERVICES:-}
+      OC_ADD_RUN_SERVICES: ${START_ADDITIONAL_SERVICES:-notifications}
       # OC_URL is set by install.sh with the correct scheme (http for local, https for real domains).
       OC_URL: "${OC_URL:-https://localhost}"
       OC_LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -763,9 +792,13 @@ services:
       PROXY_ENABLE_BASIC_AUTH: "false"
       IDM_CREATE_DEMO_USERS: "${DEMO_USERS:-false}"
       IDM_ADMIN_PASSWORD: "${INITIAL_ADMIN_PASSWORD}"
-      NOTIFICATIONS_SMTP_HOST: "${SMTP_HOST:-}"
+      # Set the admin user email to the configured domain (best-effort; honored by OpenCloud IDM).
+      # NOTE: OpenCloud's built-in login username is 'admin' (hardcoded). ADMIN_USER only
+      # controls the email address and display name — rename via the web UI after first login.
+      IDM_ADMIN_USER_EMAIL: "${ADMIN_EMAIL:-admin@localhost}"
+      NOTIFICATIONS_SMTP_HOST: "${SMTP_HOST:-172.17.0.1}"
       NOTIFICATIONS_SMTP_PORT: "${SMTP_PORT:-25}"
-      NOTIFICATIONS_SMTP_SENDER: "${SMTP_SENDER:-OpenCloud Notifications <notifications@localhost>}"
+      NOTIFICATIONS_SMTP_SENDER: "${SMTP_SENDER:-OpenCloud <noreply@localhost>}"
       NOTIFICATIONS_SMTP_USERNAME: "${SMTP_USERNAME:-}"
       NOTIFICATIONS_SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
       NOTIFICATIONS_SMTP_INSECURE: "${SMTP_INSECURE:-false}"
@@ -984,12 +1017,12 @@ __main() {
   # the summary reflects the actual configured values rather than defaults.
   if [ -f "$INSTALL_ENV_FILE" ]; then
     if [ -z "$INSTALL_DOMAIN" ]; then
-      _env_domain="$(grep -- '^OC_DOMAIN=' "$INSTALL_ENV_FILE" | cut -d= -f2- | tr -d '"')"
+      _env_domain="$(sed -n 's/^OC_DOMAIN="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$INSTALL_ENV_FILE")"
       if [ -n "$_env_domain" ] && [ "$_env_domain" != "localhost" ]; then
         INSTALL_DOMAIN="$_env_domain"
       fi
     fi
-    _env_port="$(grep -- '^OPENCLOUD_HTTP_PORT=' "$INSTALL_ENV_FILE" | cut -d= -f2- | tr -d '"')"
+    _env_port="$(sed -n 's/^OPENCLOUD_HTTP_PORT="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$INSTALL_ENV_FILE")"
     if [ -n "$_env_port" ]; then
       INSTALL_PORT="$_env_port"
     fi
