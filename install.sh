@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # shellcheck shell=sh
 # - - - - - - - - - - - - - - - - - - - - - - - - -
-##@Version           :  202605202000-git
+##@Version           :  202605202010-git
 # @@Author           :  Jason Hempstead
 # @@Contact          :  git-admin@casjaysdev.pro
 # @@License          :  MIT or LICENSE.md
@@ -20,7 +20,7 @@
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 # shellcheck disable=SC1001,SC1003,SC1091,SC2001,SC2003,SC2016,SC2031,SC2034,SC2090,SC2115,SC2120,SC2155,SC2199,SC2229,SC2317,SC2329
 # - - - - - - - - - - - - - - - - - - - - - - - - -
-VERSION="202605202000-git"
+VERSION="202605202010-git"
 # - - - - - - - - - - - - - - - - - - - - - - - - -
 APPNAME="${0##*/}"
 RUN_USER="${USER:-root}"
@@ -231,7 +231,7 @@ Notes:
   The admin password is applied ONCE at first startup; editing .env afterwards
   has no effect. Use the web UI or 'opencloud idm resetpassword' to change it.
 
-  Access the administration panel at: https://DOMAIN/settings/admin-settings
+  Access the administration panel at: https://DOMAIN/admin-settings
 
   Collabora is enabled by default. Use --no-collab to disable it.
   Collabora subdomains are inferred from --domain automatically.
@@ -1107,6 +1107,7 @@ __main() {
   __info "  Docker network: $INSTALL_NETWORK_NAME  (attach your reverse proxy here)"
   if [ -n "$INSTALL_DOMAIN" ]; then
     __info "  Public URL    : ${_sum_scheme}://$INSTALL_DOMAIN/"
+    __info "  Admin panel   : ${_sum_scheme}://$INSTALL_DOMAIN/admin-settings"
   fi
   if [ "$INSTALL_ENABLE_COLLAB" = "true" ]; then
     _bd="$(__infer_base_domain "${INSTALL_DOMAIN:-localhost}")"
